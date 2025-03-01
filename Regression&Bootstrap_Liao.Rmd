@@ -1,0 +1,629 @@
+---
+title: "Soccer"
+author: "Tianfeng Liao"
+date: "2024-12-12"
+output: html_document
+---
+```{r}
+
+```
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+```{r}
+setwd(dirname(rstudioapi::getActiveDocumentContext()$path))
+library(readxl)
+library(bootstrap)
+library(dplyr)
+library(tidyverse)
+library(caret)
+library(glmnet)
+library(MASS)
+library(ggplot2)
+library(gridExtra)
+library(car)
+library(viridis)  # For better color palettes
+library(showtext) # For font management
+library(corrplot) # For correlation plots
+
+```
+BoxTidwell avPlot 
+X power transformation
+```{r}
+# Add Microsoft YaHei font for Chinese characters
+
+
+# Theme setting for all plots
+# custom_theme <- theme_minimal() +
+#   theme(
+#     text = element_text(family = "microsoft", size = 12),
+#     plot.title = element_text(family = "microsoft", size = 14, face = "bold"),
+#     axis.title = element_text(family = "microsoft", face = "bold"),
+#     legend.title = element_text(family = "microsoft", face = "bold")
+#   )
+# Add Chinese font support for Mac
+# Theme setting for all plots
+font_add("PingFang", "/System/Library/Fonts/PingFang.ttc")
+showtext_auto()
+
+custom_theme <- theme_minimal() +
+  theme(
+    text = element_text(family = "PingFang", size = 12),
+    plot.title = element_text(family = "PingFang", size = 14, face = "bold"),
+    axis.title = element_text(family = "PingFang", face = "bold"),
+    legend.title = element_text(family = "PingFang", face = "bold")
+  )
+```
+
+# Preparation
+```{r}
+data <- read_excel("FIFA.xlsx")
+prepare_data <- function(data) {
+  data %>%
+    mutate(
+      BMI = (体重/2) /  (身高/100)^2,
+      # Remove original height and weight
+      体重 = NULL,
+      身高 = NULL,
+      国际声誉 = NULL
+    ) %>%
+    select_if(is.numeric)
+}
+
+df1 <- data [, c(10, 47)] # 综合能力和国际声誉
+df <- prepare_data(data)
+```
+# Regression Analysis
+```{r}
+model_0 <- lm(综合能力 ~ ., data <- df)
+summary(model_0)
+```
+
+## Variable Selection
+
+```{r}
+
+# Split data into training and testing sets
+set.seed(123)
+train_index <- createDataPartition(df$综合能力, p = 0.8, list = FALSE)
+train_data <- df[train_index, ]
+test_data <- df[-train_index, ]
+
+# Forward stepwise regression
+forward_model <- step(lm(综合能力 ~ 1, data = train_data), 
+                     scope = formula(lm(综合能力 ~ ., data = train_data)),
+                     direction = "forward")
+
+# Backward stepwise regression
+backward_model <- step(lm(综合能力 ~ ., data = train_data),
+                      direction = "backward")
+
+# LASSO regression
+x <- model.matrix(综合能力 ~ ., train_data)[,-1]
+y <- train_data$综合能力
+
+# Perform cross-validation to find optimal lambda
+cv_lasso <- cv.glmnet(x, y, alpha = 1)
+
+# Fit LASSO with optimal lambda
+lasso_model <- glmnet(x, y, alpha = 1, lambda = cv_lasso$lambda.min)
+
+# LASSO coefficient plot with enhanced visualization
+lasso_coef <- coef(lasso_model) %>%
+  as.matrix() %>%
+  as.data.frame() %>%
+  rownames_to_column("Variable") %>%
+  rename(Coefficient = s0) %>%
+  filter(Coefficient != 0) %>%
+  arrange(desc(abs(Coefficient)))
+
+lasso_plot <- ggplot(lasso_coef, 
+                     aes(x = reorder(Variable, abs(Coefficient)), 
+                         y = Coefficient,
+                         fill = abs(Coefficient))) +
+  geom_bar(stat = "identity") +
+  scale_fill_viridis() +
+  coord_flip() +
+  labs(title = "LASSO Coefficients", x = "Variable", y = "Coefficient Value") +
+  custom_theme
+# Plot LASSO coefficients
+lasso_coef <- coef(lasso_model) %>%
+  as.matrix() %>%
+  as.data.frame() %>%
+  rownames_to_column("Variable") %>%
+  rename(Coefficient = s0) %>%
+  filter(Coefficient != 0) %>%
+  arrange(desc(abs(Coefficient)))
+
+p3 <- ggplot(lasso_coef, aes(x = reorder(Variable, abs(Coefficient)), y = Coefficient)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  theme_minimal() +
+  labs(title = "LASSO Coefficients", x = "Variables", y = "Coefficient Value")
+
+
+```
+
+```{r Comparison Standard}
+forward_AIC <- AIC(forward_model)
+backward_AIC <- AIC(backward_model)
+# LASSO AIC
+y_pred <- predict(lasso_model, newx = x)
+RSS <- sum((y - y_pred)^2)
+k_lasso <- length(coef(lasso_model)) 
+n <- length(y)
+lasso_AIC <- n * log(RSS / n) + 2 * k_lasso
+# bootstrap for k-fold cv
+shrinkage <- function(fit, k = 10) {
+  theta.fit <- function(x, y) {
+    lsfit(x, y)
+  }
+  
+  theta.predict <- function(fit, x) {
+    cbind(1, x) %*% fit$coef
+  }
+  
+  x <- fit$model[, 2:ncol(fit$model)]   
+  y <- fit$model[, 1]  
+  results <- crossval(x, y, theta.fit, theta.predict, ngroup = k)
+  
+  r2 <- cor(y, fit$fitted.values)^2  # 原始R²
+  r2cv <- cor(y, results$cv.fit)^2  # 交叉验证后的R²
+  cat("Original R-squared =", r2, "\n")
+  cat(k, "Fold Cross-Validated R-squared =", r2cv, "\n")
+  cat("Change =", r2 - r2cv, "\n")
+  
+  return(c(r2, r2cv)) 
+}
+
+forward_r2 <- shrinkage(forward_model)
+backward_r2 <- shrinkage(backward_model)
+# LASSO 
+lasso_coef <- coef(lasso_model) %>%
+  as.matrix() %>%
+  as.data.frame() %>%
+  rownames_to_column("Variable") %>%
+  rename(Coefficient = s0) %>%
+  filter(Coefficient != 0) %>%
+  filter(Variable != "(Intercept)") %>%
+  arrange(desc(abs(Coefficient)))
+top10_variables <- lasso_coef$Variable[1:25]
+train_data_top10 <- train_data[, c("综合能力", top25_variables)]
+lasso_model1 <- lm(综合能力 ~ ., data = train_data_top25)
+lasso_r2 <- shrinkage(lasso_model1)
+
+
+# Compare models
+anova(backward_model, forward_model)
+models_comparison <- data.frame(
+  Model = c("Forward", "Backward", "LASSO"),
+  Training_RMSE = c(
+    sqrt(mean(residuals(forward_model)^2)),
+    sqrt(mean(residuals(backward_model)^2)),
+    sqrt(mean((predict(lasso_model1, newx = x) - y)^2))
+  ),
+  CV_RMSE = c(
+    sqrt(mean((predict(forward_model, newdata = train_data) - train_data$综合能力)^2)),
+    sqrt(mean((predict(backward_model, newdata = train_data) - train_data$综合能力)^2)),
+    min(cv_lasso$cvm)
+  ),
+  AIC = c(forward_AIC, backward_AIC, lasso_AIC),
+  R2 = c(forward_r2[1], backward_r2[1], lasso_r2[1]),  # 原始R²
+  R2CV = c(forward_r2[2], backward_r2[2], lasso_r2[2])  # 交叉验证后的R²
+)
+aic_comparison <- data.frame(
+  Model = c("Forward", "Backward", "LASSO"),
+  AIC = c(forward_AIC, backward_AIC, lasso_AIC)
+)
+
+
+```
+```{r Plots}
+create_correlation_plot <- function(data) {
+  corr <- cor(data)
+  corrplot(corr, 
+           method = "color",
+           type = "upper",
+           order = "hclust",
+           col = viridis(100),
+           tl.col = "black",
+           tl.srt = 45,
+           tl.cex = 0.7,
+           title = "相关性热图",
+           mar = c(0,0,1,0))
+}
+# Create residual plots - Fixed version
+create_residual_plots <- function(model, data) {
+  fitted_vals <- fitted(model)
+  residuals <- residuals(model)
+  
+  p1 <- ggplot(data.frame(fitted = fitted_vals, residuals = residuals), 
+               aes(x = fitted, y = residuals)) +
+    geom_point(aes(color = abs(residuals)), alpha = 0.6) +
+    scale_color_viridis() +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "red") +
+    labs(title = "Residual Plot", x = "Predicted value", y = "The residual") +
+    custom_theme
+
+  # Fixed Q-Q plot
+  p2 <- ggplot(data.frame(residuals = residuals), 
+               aes(sample = residuals)) +
+    stat_qq(aes(color = after_stat(sample))) +  # Fixed syntax
+    stat_qq_line() +
+    scale_color_viridis() +
+    labs(title = "Q-Q Plot", x = "Theoritcal quantile", y = "Sample quantile") +
+    custom_theme
+
+  return(list(p1 = p1, p2 = p2))
+}
+
+# Model evaluation plots
+create_prediction_plot <- function(actual, predicted, title) {
+  ggplot(data.frame(actual = actual, predicted = predicted), 
+         aes(x = actual, y = predicted)) +
+    geom_point(aes(color = abs(actual - predicted)), alpha = 0.6) +
+    scale_color_viridis(name = "Prediction error") +
+    geom_abline(intercept = 0, slope = 1, color = "red", linetype = "dashed") +
+    labs(title = title, x = "True value", y = "Predicted value") +
+    custom_theme
+}
+
+# Enhanced results visualization
+create_results_table <- function(models_comparison) {
+  comparison_long <- models_comparison %>%
+    gather(key = "Metric", value = "Value", -Model)
+  
+  ggplot(comparison_long, aes(x = Model, y = Value, fill = Metric)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    scale_fill_viridis_d() +
+    labs(title = "Model", x = "Comparison", y = "RMSE Values") +
+    custom_theme +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1))
+}
+```
+
+```{r print results}
+
+comparison_plot <- create_results_table(models_comparison)
+cat("\n========== 模型比较结果 ==========\n")
+print(models_comparison, digits = 4)
+
+cat("\n========== Forward Stepwise 选择的变量 ==========\n")
+print(formula(forward_model))
+
+cat("\n========== Backward Stepwise 选择的变量 ==========\n")
+print(formula(backward_model))
+
+cat("\n========== LASSO 选择的变量 (非零系数) ==========\n")
+print(lasso_coef, digits = 4)
+```
+```{r}
+forward_plots <- create_residual_plots(forward_model, train_data)
+backward_plots <- create_residual_plots(backward_model, train_data)
+
+forward_pred <- create_prediction_plot(
+  test_data$综合能力,
+  predict(forward_model, test_data),
+  "Forward Stepwise Prediction"
+)
+
+backward_pred <- create_prediction_plot(
+  test_data$综合能力, 
+  predict(backward_model, test_data),
+  "Backward Stepwise Prediction"
+)
+ggplot(aic_comparison, aes(x = Model, y = AIC, fill = Model)) +
+  geom_bar(stat = "identity", show.legend = FALSE) +
+  scale_fill_manual(values = c("Forward" = "#66c2a5", "Backward" = "#fc8d62", "LASSO" = "#8da0cb")) +
+  labs(title = "AIC Comparison", x = "Model", y = "AIC Value") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+forward_plots$p1
+forward_plots$p2
+forward_pred
+backward_pred
+lasso_plot
+comparison_plot
+```
+
+```{r}
+model_formula <- formula(backward_model)
+
+model_back<- lm(model_formula, data = df)
+```
+
+# Multicollinearity
+```{r vif}
+vif_values <- vif(model_back)
+
+vif_df <- data.frame(
+  Feature = names(vif_values), 
+  VIF = vif_values
+)
+
+ggplot(vif_df, aes(x = reorder(Feature, VIF), y = VIF)) +
+  geom_bar(stat = "identity", fill = "skyblue") +
+  coord_flip() +  
+  labs(title = "VIF for Each Feature", x = "Feature", y = "VIF") +
+  theme_minimal()
+```
+```{r ridge to deal}
+response <- df$综合能力
+predictors <- df[, c("年龄", "花式技巧", "头球精度", "短传", "凌空", "任意球精度", 
+                     "长传", "控球", "加速", "速度", "移动反应", "平衡", 
+                     "体能", "强壮", "侵略性", "拦截意识", "跑位", "点球", 
+                     "沉着", "抢断", "鱼跃", "手形", "开球", "站位", 
+                     "守门反应", "BMI")]
+
+predictors_scaled <- scale(predictors)
+
+ridge_model <- glmnet(predictors_scaled, response, alpha = 0)
+
+cv_ridge_model <- cv.glmnet(predictors_scaled, response, alpha = 0)
+
+best_lambda <- cv_ridge_model$lambda.min
+ridge_coefficients <- coef(cv_ridge_model, s = "lambda.min")
+print(ridge_coefficients)
+
+predictions <- predict(cv_ridge_model, s = "lambda.min", newx = predictors_scaled)
+plot(cv_ridge_model$glmnet.fit, xvar = "lambda", label = TRUE)
+
+```
+
+```{r deleted model}
+vif_values <- vif(model_back) 
+vif_values <- vif_values[!names(vif_values) == "(Intercept)"]
+high_vif_features <- names(vif_values[vif_values > 10])
+remaining_vars <- setdiff(names(coef(model_back))[-1], high_vif_features)
+formula <- as.formula(paste("综合能力 ~", paste(remaining_vars, collapse = " + ")))
+model_1 <- lm(formula, data = df)
+summary(model_1)
+
+```
+```{r relative importance}
+full_r2 <- summary(model_back)$r.squared  
+
+
+relative_importance <- data.frame(变量 = character(),
+                                  R2_drop = numeric(),
+                                  stringsAsFactors = FALSE)
+predictors <- remaining_vars
+for (var in predictors) {
+
+  formula <- as.formula(paste("综合能力 ~ . -", var)) 
+  
+  
+  reduced_r2 <- summary(model_back)$r.squared
+  
+
+  r2_drop <- full_r2 - reduced_r2
+  
+  relative_importance <- rbind(relative_importance, data.frame(Variable = var, R2_drop = r2_drop))
+}
+
+relative_importance <- relative_importance[order(-relative_importance$R2_drop), ]
+
+print(relative_importance)
+
+ggplot(relative_importance, aes(x = Variable, y = R2_drop)) +
+  geom_bar(stat = "identity", fill = "lightblue", color = "black", width = 0.7) +
+  labs(title = "Relative Importance of Predictors",  
+       x = "Predictor Variables",  
+       y = "Decrease in R-squared") +   轴标签
+  theme_minimal() +  
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 6),  
+    axis.text.y = element_text(size = 12),  # 
+    axis.title = element_text(size = 14),  # 
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),   
+    panel.grid.major = element_line(color = "grey90", size = 0.5),  
+    panel.grid.minor = element_blank(),  
+    plot.margin = margin(10, 10, 10, 10),  
+    figure.width = 12,  
+    figure.height = 6   
+  ) +
+  geom_text(aes(label = round(R2_drop, 3)), vjust = -0.5, size = 3, color = "black")  # 
+
+top_variables <- head(relative_importance, 10)
+ggplot(top_variables, aes(x = Variable, y = R2_drop)) +
+  geom_bar(stat = "identity", fill = "lightblue", color = "black", width = 0.7) + 
+  labs(title = "Top 10 Relative Importance of Predictors",  
+       x = "Predictor Variables",  
+       y = "Decrease in R-squared") +  
+  theme_minimal() +  
+  theme(
+    axis.text.x = element_text(angle = 26, hjust = 1, size = 8),
+    axis.text.y = element_text(size = 12),
+    axis.title = element_text(size = 14),
+    plot.title = element_text(size = 16, face = "bold", hjust = 0.5),
+    panel.grid.major = element_line(color = "grey90", size = 0.5),
+    panel.grid.minor = element_blank(),
+    plot.margin = margin(10, 10, 10, 10)
+  ) +
+  geom_text(aes(label = round(R2_drop, 3)), vjust = -0.5, size = 3, color = "black")
+
+
+```
+# Test
+```{r}
+library(gvlma)
+gvmodel <- gvlma(model_back)
+summary(gvmodel)
+```
+```{r Test}
+residuals_studentized <- rstudent(model_back)
+ks.test(model_back$residuals, "pnorm")
+qqnorm(residuals_studentized, main="Q-Q Plot")
+
+qqline(residuals_studentized, col="red")
+# residplot <- function(fit, nbreaks = 10) {
+#   z <- rstudent(fit)
+#   hist(z, breaks = nbreaks, freq = FALSE,
+#        xlab = "Studentized Residual",
+#        main = "Distribution of Errors")
+#   rug(jitter(z), col = "brown")
+#   curve(dnorm(x, mean = mean(z), sd = sd(z)),
+#         add = TRUE, col = "blue", lwd = 2)
+#   lines(density(z)$x, density(z)$y,
+#         col = "red", lwd = 2, lty = 2)
+#   legend("topright",
+#          legend = c("Normal Curve", "Kernel Density Curve"),
+#          lty = 1:2, col = c("blue", "red"), cex = 0.7)
+# }
+# residplot(model)
+
+durbinWatsonTest(model_back) # Independence
+
+crPlots(model_back) # Linearity
+
+ncvTest(model_back) # homoscedasticity
+spreadLevelPlot(model_back)
+```
+```{r}
+
+boxTidwell(综合能力 ~ 头球精度 + 短传 + 移动反应 + 控球 + 守门反应 + 手形, data = df)
+# Box-Tidwell 
+df$头球精度_new <- (df$头球精度^3.8343) / 3.8343
+df$短传_new <- (df$短传^2.5087) / 2.5087
+df$移动反应_new <- (df$移动反应^1.0156) / 1.0156
+df$控球_new <- (df$控球^5.2311) / 5.2311
+df$守门反应_new <- (df$守门反应^5.8016) / 5.8016
+df$手形_new <- (df$手形^4.6627) / 4.6627
+ 
+model_formula_updated <- as.formula("综合能力 ~ 年龄 + 花式技巧 + 头球精度_new + 短传_new + 凌空 + 任意球精度 + 长传 + 控球_new + 加速 + 速度 + 移动反应_new + 平衡 + 体能 + 强壮 + 侵略性 + 拦截意识 + 跑位 + 点球 + 沉着 + 抢断 + 鱼跃 + 手形_new + 开球 + 站位 + 守门反应_new + BMI")
+
+model2<- lm(model_formula_updated, data = df)
+summary(model2)
+# 只更新短传和移动反应
+model_formula_updated2 <- as.formula("综合能力 ~ 年龄 + 花式技巧 + 头球精度 + 短传_new + 凌空 + 任意球精度 + 长传 + 控球 + 加速 + 速度 + 移动反应_new + 平衡 + 体能 + 强壮 + 侵略性 + 拦截意识 + 跑位 + 点球 + 沉着 + 抢断 + 鱼跃 + 手形 + 开球 + 站位 + 守门反应 + BMI")
+model3<- lm(model_formula_updated2, data = df)
+crPlots(model2)
+crPlots(model3)
+summary(model3)
+# ncvTest(model3)
+```
+```{r model4 (正态变换)}
+pt <- powerTransform(model3)  # 对model3的响应变量进行幂变换
+summary(pt)
+model4 <- lm(I(综合能力^0.5) ~ 年龄 + 花式技巧 + 头球精度 + 短传_new + 凌空 + 任意球精度 + 长传 + 控球 + 加速 + 速度 + 移动反应_new + 平衡 + 体能 + 强壮 + 侵略性 + 拦截意识 + 跑位 + 点球 + 沉着 + 抢断 + 鱼跃 + 手形 + 开球 + 站位 + 守门反应 + BMI, data = df)
+qqPlot(model4, main = "QQ Plot of Transformed Model")
+shapiro.test(residuals(model4))
+summary(model4) # R方变小
+```
+```{r model 5 异方差性}
+
+df_base <- as.data.frame(df) 
+model3 <- lm(model_formula_updated2, data = df_base)
+boxcox_result <- boxcox(model3, lambda = seq(-2, 2, 0.1),
+                        main = "Box-Cox Transformation")
+lambda_opt <- boxcox_result$x[which.max(boxcox_result$y)]
+if (abs(lambda_opt) > 0.01) {
+  df$综合能力_transformed <- (df$综合能力^lambda_opt - 1) / lambda_opt
+} else {
+  df$综合能力_transformed <- log(df$综合能力)
+}
+
+
+model5 <- lm(综合能力_transformed ~ 年龄 + 花式技巧 + 头球精度 + 短传_new + 凌空 + 任意球精度 + 长传 + 控球 + 加速 + 速度 + 移动反应_new + 平衡 + 体能 + 强壮 + 侵略性 + 拦截意识 + 跑位 + 点球 + 沉着 + 抢断 + 鱼跃 + 手形 + 开球 + 站位 + 守门反应 + BMI, data = df)
+summary(model5)
+ncvTest(model5)
+```
+
+```{r}
+
+library(caret)
+library(glmnet)
+cv_metrics <- function(model, data, response_variable, k = 10) {
+  x <- model.matrix(as.formula(paste(response_variable, "~ .")), data)[,-1]
+  y <- data[[response_variable]]
+  
+  train_control <- trainControl(method = "cv", number = k)
+  
+  cv_fit <- train(x, y, method = "lm", trControl = train_control)
+  
+  cv_rmse <- sqrt(mean((cv_fit$resample$RMSE)^2))
+  
+  model_summary <- summary(model)
+  r_squared <- model_summary$r.squared
+  
+  return(c(CV_RMSE = cv_rmse, R2 = r_squared))
+}
+
+models <- list(model_0, model_back, model2, model3, model4, model5)
+model_names <- c("model_0", "model_back", "model2", "model3", "model4", "model5")
+
+
+cv_results <- data.frame(Model = model_names, CV_RMSE = NA, R2 = NA)
+
+for (i in 1:length(models)) {
+  metrics <- cv_metrics(models[[i]], train_data, "综合能力")
+  cv_results$CV_RMSE[i] <- metrics["CV_RMSE"]
+  cv_results$R2[i] <- metrics["R2"]
+}
+
+print(cv_results)
+
+```
+
+```{r infulential points}
+# Outliers
+outlierTest(model3)
+hat.plot <- function(fit) { 
+  p <- length(coefficients(fit)) 
+  n <- length(fitted(fit)) 
+  plot(hatvalues(fit), main="Index Plot of Hat Values") 
+  abline(h=c(2,3)*p/n, col="red", lty=2) 
+  identify(1:n, hatvalues(fit), names(hatvalues(fit)))
+}
+hat.plot(model3)
+# Cook's distance
+cutoff <- 4 / (3961 - length(model3$coefficients) - 2)
+plot(model3, which=4, cook.levels=cutoff)
+abline(h=cutoff, lty=2, col="red")
+```
+不准再变了，就用model_back
+```{r}
+library(boot)
+rsq <- function(formula, data, indices) { 
+  d <- data[indices, ]
+fit <- lm(formula, data = d) 
+return(summary(fit)$r.square)
+}
+results <-
+  boot(
+    data = df,
+    statistic = rsq,
+    R = 1000,
+    formula = model_formula
+  )
+print(results)
+```
+
+```{r}
+bs <- function(formula, data, indices) { d <- data[indices,]
+fit <- lm(formula, data = d) 
+return(coef(fit))
+}
+library(boot)
+set.seed(1234)
+results <-
+  boot(
+    data = df,
+    statistic = bs,
+    R = 1000,
+    formula = model_formula
+  )
+print(results)
+lm_coefs <- coef(model_back)
+boot_coefs <- results$t0
+boot_std_error <- apply(results$t, 2, sd)
+comparison <- data.frame( 
+  Original_Stat = boot_coefs,      # Bootstrap原始系数统计量
+  Bias = boot_coefs - lm_coefs,    # 偏差：Bootstrap原始系数 - LM系数
+  Std_Error = boot_std_error       # Bootstrap标准误差
+)
+print(comparison)
+```
+
